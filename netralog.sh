@@ -53,7 +53,7 @@ Examples:
     $(basename "$0") -s 2025-10-11 -e 2025-10-12 -o reports/day2.txt sample-logs/access.log
 EOF
 }
-usage
+
 die() {
     printf 'Error: %s\n' "$*" >&2
     exit 1
@@ -78,3 +78,96 @@ valid_date() {
 
     [[ "$(date -d "$1" +%F 2>/dev/null)" == "$1" ]]
 }
+
+# Argument parsing and validation
+# ------------------------------------------ Argument parsing ------------------------------------------
+
+while getopts ":t:n:s:e:o:c:b:r:p:Nhv" opt; do
+    case "$opt" in
+        n) TOP_N="$OPTARG" ;;
+        t) LOG_TYPE="$OPTARG" ;;
+        s) START_DATE="$OPTARG" ;;
+        e) END_DATE="$OPTARG" ;;
+        o) REPORT_FILE="$OPTARG" ;;
+        c) CSV_DIR="$OPTARG" ;;
+        N) USE_COLOR=0 ;;
+        b) BRUTE_THRESHOLD="$OPTARG" ;;
+        r) HIGH_REQ_THRESHOLD="$OPTARG" ;;
+        p) PROBE_404_THRESHOLD="$OPTARG" ;;
+        h) usage; exit 0 ;;
+        v) echo "NetraLog v$VERSION"; exit 0 ;;
+        :)
+            die "Option -$OPTARG needs a value. Use -h for help."
+            ;;
+        \?)
+            die "Unknown option -$OPTARG. Use -h for help."
+            ;;
+    esac
+done
+
+shift "$((OPTIND - 1))"
+
+# Validate positional arguments
+[ "$#" -eq 1 ] || {
+    usage >&2
+    exit 1
+}
+
+LOG_FILE="$1"
+
+# Validate the input log file
+[ -e "$LOG_FILE" ] || die "File not found: $LOG_FILE"
+[ -f "$LOG_FILE" ] || die "Not a regular file: $LOG_FILE"
+[ -r "$LOG_FILE" ] || die "Cannot read file (permission denied): $LOG_FILE"
+[ -s "$LOG_FILE" ] || die "File is empty: $LOG_FILE"
+
+# Validate log type
+case "$LOG_TYPE" in
+    auto|access|auth) ;;
+    *) die "Invalid type '$LOG_TYPE'. Use auto, access or auth." ;;
+esac
+
+# Validate numeric thresholds
+for pair in \
+    "TOP_N:$TOP_N" \
+    "BRUTE_THRESHOLD:$BRUTE_THRESHOLD" \
+    "HIGH_REQ_THRESHOLD:$HIGH_REQ_THRESHOLD" \
+    "PROBE_404_THRESHOLD:$PROBE_404_THRESHOLD"
+do
+    is_positive_int "${pair#*:}" ||
+        die "${pair%%:*} must be a positive whole number."
+done
+
+# Validate dates
+[ -z "$START_DATE" ] ||
+    valid_date "$START_DATE" ||
+    die "Invalid start date: $START_DATE (use YYYY-MM-DD)"
+
+[ -z "$END_DATE" ] ||
+    valid_date "$END_DATE" ||
+    die "Invalid end date: $END_DATE (use YYYY-MM-DD)"
+
+# Validate date range
+if [ -n "$START_DATE" ] &&
+   [ -n "$END_DATE" ] &&
+   [[ "$START_DATE" > "$END_DATE" ]]; then
+    die "Start date is after end date."
+fi
+
+# Create CSV directory if requested
+if [ -n "$CSV_DIR" ]; then
+    mkdir -p "$CSV_DIR" 2>/dev/null ||
+        die "Cannot create CSV directory: $CSV_DIR"
+fi
+
+# Create temporary working directory
+TMP_DIR="$(mktemp -d)" ||
+    die "Cannot create temp directory."
+
+NORM="$TMP_DIR/normalized.tsv"
+SUSP="$TMP_DIR/suspicious.tsv"
+REPORT_TMP="$TMP_DIR/reports.txt"
+BAD_COUNT_FILE="$TMP_DIR/bad.count"
+
+# Initialize temporary files
+: > "$SUSP"
