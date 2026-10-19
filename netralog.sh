@@ -171,3 +171,216 @@ BAD_COUNT_FILE="$TMP_DIR/bad.count"
 
 # Initialize temporary files
 : > "$SUSP"
+
+# ----------------------------------- Log type detection ------------------------------------------
+detect_type() {
+    if grep -m1 -qE '\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:' "$LOG_FILE"; then
+        echo access
+    elif grep -m1 -qE 'sshd(\[[0-9]+\])?:' "$LOG_FILE"; then
+        echo auth
+    else
+        echo unknown
+    fi
+}
+
+if [ "$LOG_TYPE" = "auto" ]; then
+    LOG_TYPE="$(detect_type)"
+    [ "$LOG_TYPE" != "unknown" ] ||
+        die "Could not detect log type. Use -t access or -t auth."
+fi
+
+normalize_access() {
+    local s="${START_DATE//-/}"
+    local e="${END_DATE//-/}"
+
+    awk -v s="$s" -v e="$e" -v badfile="$BAD_COUNT_FILE" '
+    BEGIN {
+        split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", m, " ")
+        for (i = 1; i <= 12; i++)
+            mon[m[i]] = sprintf("%02d", i)
+        bad = 0
+    }
+
+    {
+        ts = $4
+
+        if (substr(ts, 1, 1) != "[" ||
+            !(substr(ts, 5, 3) in mon) ||
+            $9 !~ /^[0-9][0-9][0-9]$/) {
+            bad++
+            next
+        }
+
+        d = substr(ts, 9, 4) mon[substr(ts, 5, 3)] substr(ts, 2, 2)
+
+        if (s != "" && d < s)
+            next
+
+        if (e != "" && d > e)
+            next
+
+        method = substr($6, 2)
+
+        printf "%s\t%s\t%s\t%s\t%s\n", $1, d, $9, method, $7
+    }
+
+    END {
+        print bad > badfile
+        close(badfile)
+    }
+    ' "$LOG_FILE" > "$NORM"
+}
+
+# ------------------------------- Helper functions ------------------------------------
+# count_file FILE FIELD -> "count<TAB>value", highest first
+count_field() {
+    cut -f "$2" "$1" |
+        sort |
+        uniq -c |
+        sort -k1,1nr -k2,2 |
+        awk '{print $1 "\t" $2}'
+}
+
+print_top() {
+    head -n "$TOP_N" |
+        awk -F'\t' '{printf " %-42s %8d\n", $2, $1}'
+}
+
+csv_from_counts() {
+    awk -F'\t' -v h1="$1" -v h2="$2" '
+    function csv(s) {
+        gsub(/"/, "\"\"", s)
+        return "\"" s "\""
+    }
+    BEGIN {
+        print csv(h1) "," csv(h2)
+    }
+    {
+        print csv($2) "," csv($1)
+    }'
+}
+
+section() {
+    echo
+    echo "== $1 =="
+}
+
+flag() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$SUSP"
+}
+
+indicator() {
+    if [ "$2" -gt 0 ]; then
+        printf ' [!] %-34s DETECTED (%d IP)\n' "$1" "$2"
+    else
+        printf ' [ok] %-33s none\n' "$1"
+    fi
+}
+
+report_access() {
+    local total unique bad
+
+    total=$(wc -l < "$NORM")
+    bad=$(cat "$BAD_COUNT_FILE" 2>/dev/null || echo 0)
+
+    echo "========= NETRALOG REPORT =============="
+    echo "File:         $LOG_FILE"
+    echo "Log type:     Web access log (Apache2/Nginx combined)"
+    echo "Generated:    $(date '+%Y-%m-%d %H:%M:%S')"
+
+    [ -z "$START_DATE" ] || echo "From date: $START_DATE"
+    [ -z "$END_DATE" ] || echo "To date: $END_DATE"
+
+    if [ "$total" -eq 0 ]; then
+        echo
+        echo "No valid log entries found for this filter."
+        echo "Skipped (malformed) lines: $bad"
+        return
+    fi
+
+    unique=$(cut -f1 "$NORM" | sort -u | wc -l)
+
+    section "OVERVIEW"
+
+    printf ' %-28s %s\n' "Total log entries:" "$total"
+    printf ' %-28s %s\n' "Unique IP Addresses:" "$unique"
+    printf ' %-28s %s\n' "Malformed lines skipped:" "$bad"
+
+    printf ' %-28s %s to %s\n' "Date range:" \
+        "$(cut -f2 "$NORM" | sort | head -n1)" \
+        "$(cut -f2 "$NORM" | sort | tail -n1)"
+
+    section "TOP $TOP_N IP ADDRESSES (by requests)"
+
+    count_field "$NORM" 1 | print_top
+}
+
+normalize_auth() {
+    awk '
+    BEGIN {
+        OFS = "\t"
+    }
+    {
+        if ($0 !~ /sshd\[/ && $0 !~ /sshd:/) next
+
+        if (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}/)) {
+            ip = substr($0, RSTART, RLENGTH)
+        } else {
+            next
+        }
+
+        line = $0
+        if (line ~ /Failed password/) {
+            print ip, "failed", substr($1 " " $2 " " $3, 1, 0)
+        } else if (line ~ /Accepted /) {
+            print ip, "accepted"
+        }
+    }
+    ' "$LOG_FILE" > "$NORM"
+}
+
+report_auth() {
+    local total failed accepted brackets
+
+    total=$(wc -l < "$NORM")
+    echo "========= NETRALOG REPORT =============="
+    echo "File:         $LOG_FILE"
+    echo "Log type:     SSH auth log"
+    echo "Generated:    $(date '+%Y-%m-%d %H:%M:%S')"
+
+    if [ "$total" -eq 0 ]; then
+        echo
+        echo "No SSH auth entries found."
+        return
+    fi
+
+    section "OVERVIEW"
+    printf ' %-28s %s\n' "Total auth events:" "$total"
+    printf ' %-28s %s\n' "Unique IPs:" "$(cut -f1 "$NORM" | sort -u | wc -l)"
+
+    section "TOP $TOP_N FAILED IP ADDRESSES"
+    awk -F'\t' '$2 == "failed" { count[$1]++ } END { for (ip in count) print count[ip], ip }' "$NORM" | sort -k1,1nr -k2,2 | head -n "$TOP_N" | awk '{printf " %-42s %8d\n", $2, $1}'
+}
+
+main() {
+    if [ "$LOG_TYPE" = "access" ]; then
+        normalize_access
+        report_access
+    elif [ "$LOG_TYPE" = "auth" ]; then
+        normalize_auth
+        report_auth
+    fi
+
+    if [ -n "$REPORT_FILE" ]; then
+        : > "$REPORT_FILE"
+        if [ "$LOG_TYPE" = "access" ]; then
+            normalize_access
+            report_access > "$REPORT_FILE"
+        else
+            normalize_auth
+            report_auth > "$REPORT_FILE"
+        fi
+    fi
+}
+
+main "$@"
