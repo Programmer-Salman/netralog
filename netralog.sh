@@ -384,3 +384,15 @@ main() {
 }
 
 main "$@"
+
+section "HTTP STATUS CODES"
+count_field "$NORM" 3 | awk -F'\t' '{printf " %-10s %8d\n" , $2, $1}'
+echo
+awk -F'\t' '{ g = substr($3, 1, 1) "xx"; c[g]++ }
+    END { for (k in c) printf " %-10s %8d\n", k, c[k] }' "$NORM" | sort 
+
+section  "TOP $TOP_N REQUESTED URLS"
+count_field "$NORM" 5 | print_top
+
+section "HTTP METHODS"
+count_field "$NORM" 4 | awk -F'\t' '{printf " %-10s %8d\n", $2, $1}'
