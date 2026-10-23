@@ -313,36 +313,54 @@ report_access() {
     section "TOP $TOP_N IP ADDRESSES (by requests)"
 
     count_field "$NORM" 1 | print_top
+
+    section "HTTP STATUS CODES"
+    count_field "$NORM" 3 | awk -F'\t' '{printf " %-10s %8d\n", $2, $1}'
+
+    section "HTTP STATUS GROUPS"
+    awk -F'\t' '{ group = substr($3, 1, 1) "xx"; count[group]++ }
+        END { for (group in count) printf " %-10s %8d\n", group, count[group] }' "$NORM" | sort
+
+    section "TOP $TOP_N REQUESTED URLS"
+    count_field "$NORM" 5 | print_top
+
+    section "HTTP METHODS"
+    count_field "$NORM" 4 | awk -F'\t' '{printf " %-10s %8d\n", $2, $1}'
 }
 
 normalize_auth() {
     awk '
-    BEGIN {
-        OFS = "\t"
+    /sshd/ && /Failed password for/ {
+        user = ""; ip = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i == "for" && user == "") {
+                if ($(i+1) == "invalid" && $(i+2) == "user")
+                    user = $(i+3)
+                else
+                    user = $(i+1)
+            }
+            if ($i == "from" && ip == "") ip = $(i+1)
+        }
+        if (ip != "" && user != "") print "F\t" ip "\t" user
+        next
     }
-    {
-        if ($0 !~ /sshd\[/ && $0 !~ /sshd:/) next
-
-        if (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}/)) {
-            ip = substr($0, RSTART, RLENGTH)
-        } else {
-            next
+    /sshd/ && /Accepted (password|publickey) for/ {
+        user = ""; ip = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i == "for" && user == "") user = $(i+1)
+            if ($i == "from" && ip == "") ip = $(i+1)
         }
-
-        line = $0
-        if (line ~ /Failed password/) {
-            print ip, "failed", substr($1 " " $2 " " $3, 1, 0)
-        } else if (line ~ /Accepted /) {
-            print ip, "accepted"
-        }
+        if (ip != "" && user != "") print "A\t" ip "\t" user
     }
     ' "$LOG_FILE" > "$NORM"
 }
 
 report_auth() {
-    local total failed accepted brackets
+    local total failed accepted
 
     total=$(wc -l < "$NORM")
+    failed=$(awk -F'\t' '$1 == "F"' "$NORM" | wc -l)
+    accepted=$(awk -F'\t' '$1 == "A"' "$NORM" | wc -l)
     echo "========= NETRALOG REPORT =============="
     echo "File:         $LOG_FILE"
     echo "Log type:     SSH auth log"
@@ -356,10 +374,23 @@ report_auth() {
 
     section "OVERVIEW"
     printf ' %-28s %s\n' "Total auth events:" "$total"
-    printf ' %-28s %s\n' "Unique IPs:" "$(cut -f1 "$NORM" | sort -u | wc -l)"
+    printf ' %-28s %s\n' "Failed logins:" "$failed"
+    printf ' %-28s %s\n' "Successful SSH logins:" "$accepted"
 
-    section "TOP $TOP_N FAILED IP ADDRESSES"
-    awk -F'\t' '$2 == "failed" { count[$1]++ } END { for (ip in count) print count[ip], ip }' "$NORM" | sort -k1,1nr -k2,2 | head -n "$TOP_N" | awk '{printf " %-42s %8d\n", $2, $1}'
+    if [ "$failed" -eq 0 ]; then
+        echo
+        echo "No failed login attempts detected."
+        return
+    fi
+
+    awk -F'\t' '$1 == "F" {print $2 "\t" $3}' "$NORM" > "$TMP_DIR/failed.tsv"
+    printf ' %-28s %s\n' "Unique IPs with failed logins:" "$(cut -f1 "$TMP_DIR/failed.tsv" | sort -u | wc -l)"
+    printf ' %-28s %s\n' "Unique usernames attempted:" "$(cut -f2 "$TMP_DIR/failed.tsv" | sort -u | wc -l)"
+
+    section "TOP $TOP_N IP ADDRESSES (by failed logins)"
+    count_field "$TMP_DIR/failed.tsv" 1 | print_top
+    section "TOP $TOP_N USERNAMES (by failed logins)"
+    count_field "$TMP_DIR/failed.tsv" 2 | print_top
 }
 
 main() {
@@ -385,14 +416,3 @@ main() {
 
 main "$@"
 
-section "HTTP STATUS CODES"
-count_field "$NORM" 3 | awk -F'\t' '{printf " %-10s %8d\n" , $2, $1}'
-echo
-awk -F'\t' '{ g = substr($3, 1, 1) "xx"; c[g]++ }
-    END { for (k in c) printf " %-10s %8d\n", k, c[k] }' "$NORM" | sort 
-
-section  "TOP $TOP_N REQUESTED URLS"
-count_field "$NORM" 5 | print_top
-
-section "HTTP METHODS"
-count_field "$NORM" 4 | awk -F'\t' '{printf " %-10s %8d\n", $2, $1}'
