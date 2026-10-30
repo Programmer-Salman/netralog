@@ -416,3 +416,48 @@ main() {
 
 main "$@"
 
+# 1) High request volume
+cut -f1 "$NORM" | sort | uniq -c | awk -v threshold="$HIGH_REQ_THRESHOLD" '$1 > threshold {print $2 "\t" $1}' > "$TMP_DIR/high_req.tsv"
+n=$(wc -l < "$TMP_DIR/high_req.tsv")
+while IFS=$'\t' read -r ip count; do
+    flag "High request volume" "$ip" "$count"
+done < "$TMP_DIR/high_req.tsv"
+indicator "High request volume (>$HIGH_REQ_THRESHOLD requests)" "$n"
+
+# 2) Repeated 404 probing
+awk -F'\t' '$3 == "404" {print $1}' "$NORM" | sort | uniq -c \
+    | awk -v threshold="$PROBE_404_THRESHOLD" '$1 > threshold {print $2 "\t" $1}' > "$TMP_DIR/probe_404.tsv"
+n=$(wc -l < "$TMP_DIR/probe_404.tsv")
+while IFS=$'\t' read -r ip count; do
+    flag "Repeated 404 probing" "$ip" "$count"
+done < "$TMP_DIR/probe_404.tsv"
+indicator "Repeated 404 probing (>$PROBE_404_THRESHOLD times)" "$n"
+
+#3) Sensitive path probing
+awk -F'\t' '
+    {
+        u = tolower($5)
+    }
+    u ~ /[.]env|wp-login|wp-admin|phpmyadmin|\/admin|xmlrpc[.]php|etc\/passwd|cgi-bin/ {
+        print $1
+    }
+' "$NORM" | sort | uniq -c \
+    | awk -v threshold="$SENSITIVE_THRESHOLD" '$1 > threshold {print $2 "\t" $1}' > "$TMP_DIR/sensitive.tsv"
+n=$(wc -l < "$TMP_DIR/sensitive.tsv")
+while IFS=$'\t' read -r ip count; do
+    flag "Sensitive path probing" "$ip" "$count"
+done < "$TMP_DIR/sensitive.tsv"
+indicator "Sensitive path probing (>$SENSITIVE_THRESHOLD times)" "$n"
+
+#4) Repeated 401/403 responses (login hammering or forbidden paths)
+awk -F'\t' '$3 == "401" || $3 == "403" {print $1}' "$NORM" | sort | uniq -c \
+    | awk -v threshold="$DENIED_THRESHOLD" '$1 > threshold {print $2 "\t" $1}' > "$TMP_DIR/denied.tsv"
+n=$(wc -l < "$TMP_DIR/denied.tsv")
+while IFS=$'\t' read -r ip count; do
+    flag "Repeated 401/403 responses" "$ip" "$count"
+done < "$TMP_DIR/denied.tsv"
+indicator "Repeated 401/403 responses (>$DENIED_THRESHOLD times)" "$n"
+
+# 5) Server errors (information only)
+e5=$(awk -F'\t' '$3 ~ /^5[0-9][0-9]$/ {c++} END {print c + 0}' "$NORM")
+printf ' [i] %-34s %d requests\n' "Server errors (5xx)" "$e5"
